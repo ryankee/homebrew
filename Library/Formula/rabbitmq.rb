@@ -2,8 +2,8 @@ require 'formula'
 
 class Rabbitmq < Formula
   homepage 'http://www.rabbitmq.com'
-  url 'http://www.rabbitmq.com/releases/rabbitmq-server/v2.6.0/rabbitmq-server-2.6.0.tar.gz'
-  md5 'e4d9b6792b556f0c145cf02f1430f0b3'
+  url 'http://www.rabbitmq.com/releases/rabbitmq-server/v2.7.1/rabbitmq-server-2.7.1.tar.gz'
+  md5 '44eb09d2dff8ce641a1fe7f255a4c546'
 
   depends_on 'erlang'
   depends_on 'simplejson' => :python if MacOS.leopard?
@@ -23,7 +23,7 @@ class Rabbitmq < Formula
     (var+'lib/rabbitmq').mkpath
     (var+'log/rabbitmq').mkpath
 
-    %w{rabbitmq-server rabbitmqctl rabbitmq-env}.each do |script|
+    %w{rabbitmq-server rabbitmqctl rabbitmq-env rabbitmq-plugins}.each do |script|
       inreplace sbin+script do |s|
         s.gsub! '/etc/rabbitmq', "#{etc}/rabbitmq"
         s.gsub! '/var/lib/rabbitmq', "#{var}/lib/rabbitmq"

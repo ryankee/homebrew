@@ -100,7 +100,8 @@ class Formula
   include FileUtils
 
   attr_reader :name, :path, :url, :version, :homepage, :specs, :downloader
-  attr_reader :bottle, :bottle_sha1
+  attr_reader :stable, :unstable
+  attr_reader :bottle, :bottle_sha1, :head
 
   # Homebrew determines the name
   def initialize name='__UNKNOWN__', path=nil
@@ -130,7 +131,7 @@ class Formula
     @name=name
     validate_variable :name
 
-    @path=path
+    @path = path.nil? ? nil : Pathname.new(path)
 
     set_instance_variable 'version'
     @version ||= @spec_to_use.detect_version
@@ -146,6 +147,13 @@ class Formula
     return installed_prefix.children.length > 0
   rescue
     return false
+  end
+
+  def explicitly_requested?
+    # `ARGV.formulae` will throw an exception if it comes up with an empty list.
+    # FIXME: `ARGV.formulae` shouldn't be throwing exceptions, see issue #8823
+   return false if ARGV.named.empty?
+   ARGV.formulae.include? self
   end
 
   def installed_prefix
@@ -243,7 +251,7 @@ class Formula
   # sometimes the clean process breaks things
   # skip cleaning paths in a formula with a class method like this:
   #   skip_clean [bin+"foo", lib+"bar"]
-  # redefining skip_clean? in formulas is now deprecated
+  # redefining skip_clean? now deprecated
   def skip_clean? path
     return true if self.class.skip_clean_all?
     to_check = path.relative_path_from(prefix).to_s
@@ -321,8 +329,7 @@ class Formula
   end
 
   def handle_llvm_failure llvm
-    case ENV.compiler
-    when :llvm, :clang
+    if ENV.compiler == :llvm
       # version 2335 is the latest version as of Xcode 4.1, so it is the
       # latest version we have tested against so we will switch to GCC and
       # bump this integer when Xcode 4.2 is released. TODO do that!
@@ -341,7 +348,11 @@ class Formula
         that we can update the formula accordingly. Thanks!
         EOS
       puts
-      puts "If it doesn't work you can: brew install --use-gcc"
+      if MacOS.xcode_version < "4.2"
+        puts "If it doesn't work you can: brew install --use-gcc"
+      else
+        puts "If it doesn't work you can try: brew install --use-clang"
+      end
       puts
     end
   end
@@ -386,6 +397,9 @@ class Formula
   end
 
   def self.canonical_name name
+    # Cast pathnames to strings.
+    name = name.to_s if name.kind_of? Pathname
+
     formula_with_that_name = HOMEBREW_REPOSITORY+"Library/Formula/#{name}.rb"
     possible_alias = HOMEBREW_REPOSITORY+"Library/Aliases/#{name}"
     possible_cached_formula = HOMEBREW_CACHE_FORMULA+"#{name}.rb"
@@ -456,6 +470,10 @@ class Formula
 
   def self.path name
     HOMEBREW_REPOSITORY+"Library/Formula/#{name.downcase}.rb"
+  end
+
+  def mirrors
+    self.class.mirrors or []
   end
 
   def deps
@@ -549,15 +567,43 @@ private
 
   CHECKSUM_TYPES=[:md5, :sha1, :sha256].freeze
 
-  public # for FormulaInstaller
+  public
+  # For brew-fetch and others.
+  def fetch
+    downloader = @downloader
+    # Don't attempt mirrors if this install is not pointed at a "stable" URL.
+    # This can happen when options like `--HEAD` are invoked.
+    mirror_list =  @spec_to_use == @stable ? mirrors : []
 
+    # Ensure the cache exists
+    HOMEBREW_CACHE.mkpath
+
+    begin
+      fetched = downloader.fetch
+    rescue CurlDownloadStrategyError => e
+      raise e if mirror_list.empty?
+      puts "Trying a mirror..."
+      url, specs = mirror_list.shift.values_at :url, :specs
+      downloader = download_strategy.new url, name, version, specs
+      retry
+    end
+
+    return fetched, downloader
+  end
+
+  # Detect which type of checksum is being used, or nil if none
+  def checksum_type
+    CHECKSUM_TYPES.detect { |type| instance_variable_defined?("@#{type}") }
+  end
+
+  # For FormulaInstaller.
   def verify_download_integrity fn, *args
     require 'digest'
     if args.length != 2
-      type=CHECKSUM_TYPES.detect { |type| instance_variable_defined?("@#{type}") }
-      type ||= :md5
-      supplied=instance_variable_get("@#{type}")
-      type=type.to_s.upcase
+      type = checksum_type || :md5
+      supplied = instance_variable_get("@#{type}")
+      # Convert symbol to readable string
+      type = type.to_s.upcase
     else
       supplied, type = args
     end
@@ -584,11 +630,10 @@ EOF
   private
 
   def stage
-    HOMEBREW_CACHE.mkpath
-    fetched = @downloader.fetch
+    fetched, downloader = fetch
     verify_download_integrity fetched if fetched.kind_of? Pathname
     mktemp do
-      @downloader.stage
+      downloader.stage
       yield
     end
   end
@@ -688,7 +733,7 @@ EOF
       end
     end
 
-    attr_rw :version, :homepage, :specs, :deps, :external_deps
+    attr_rw :version, :homepage, :mirrors, :specs, :deps, :external_deps
     attr_rw :keg_only_reason, :fails_with_llvm_reason, :skip_clean_all
     attr_rw :bottle, :bottle_sha1
     attr_rw(*CHECKSUM_TYPES)
@@ -705,6 +750,16 @@ EOF
       @stable = SoftwareSpecification.new(val, specs)
       @url = val
       @specs = specs
+    end
+
+    def mirror val, specs=nil
+      @mirrors ||= []
+      @mirrors << {:url => val, :specs => specs}
+      # Added the uniq after some inspection with Pry---seems `mirror` gets
+      # called three times. The first two times only one copy of the input is
+      # left in `@mirrors`. On the final call, two copies are present. This
+      # happens with `@deps` as well. Odd.
+      @mirrors.uniq!
     end
 
     def depends_on name
